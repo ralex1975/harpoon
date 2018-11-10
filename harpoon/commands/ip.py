@@ -13,6 +13,7 @@ import shutil
 import pyasn
 import urllib
 import socket
+import requests
 from IPy import IP
 from dateutil.parser import parse
 from harpoon.commands.base import Command
@@ -24,6 +25,8 @@ from pygreynoise import GreyNoise, GreyNoiseError
 from passivetotal.libs.dns import DnsRequest
 from passivetotal.libs.enrichment import EnrichmentRequest
 from pythreatgrid import ThreatGrid, ThreatGridError
+from harpoon.commands.asn import CommandAsn
+from mispy import MispServer
 
 
 class CommandIp(Command):
@@ -181,6 +184,9 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
         except FileNotFoundError:
             pass
             # TODO: add private
+        asnc = CommandAsn()
+        res = asnc.asn_caida(ipinfo['asn'])
+        ipinfo['asn_type'] = res['type']
         return ipinfo
 
     def run(self, conf, args, plugins):
@@ -206,6 +212,7 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                             ipinfo['asn_name']
                         )
                     )
+                    print('CAIDA Type: %s' % ipinfo['asn_type'])
                 asndb2 = pyasn.pyasn(self.asncidr)
                 res = asndb2.lookup(ip)
                 if res[1] is None:
@@ -252,6 +259,13 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                 urls = []
                 malware = []
                 files = []
+                # MISP
+                misp_e = plugins['misp'].test_config(conf)
+                if misp_e:
+                    print('[+] Downloading MISP information...')
+                    server = MispServer(url=conf['Misp']['url'], apikey=conf['Misp']['key'])
+                    misp_results = server.attributes.search(value=unbracket(args.IP))
+
                 # OTX
                 otx_e = plugins['otx'].test_config(conf)
                 if otx_e:
@@ -274,16 +288,20 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                 # RobTex
                 print('[+] Downloading Robtex information....')
                 rob = Robtex()
-                res = rob.get_ip_info(unbracket(args.IP))
-                for d in ["pas", "pash", "act", "acth"]:
-                    if d in res:
-                        for a in res[d]:
-                            passive_dns.append({
-                                'first': a['date'],
-                                'last': a['date'],
-                                'domain': a['o'],
-                                'source': 'Robtex'
-                            })
+                try:
+                    res = rob.get_ip_info(unbracket(args.IP))
+                except RobtexError:
+                    print("Error with Robtex")
+                else:
+                    for d in ["pas", "pash", "act", "acth"]:
+                        if d in res:
+                            for a in res[d]:
+                                passive_dns.append({
+                                    'first': a['date'],
+                                    'last': a['date'],
+                                    'domain': a['o'],
+                                    'source': 'Robtex'
+                                })
 
                 # PT
                 pt_e = plugins['pt'].test_config(conf)
@@ -291,34 +309,40 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                     out_pt = False
                     print('[+] Downloading Passive Total information....')
                     client = DnsRequest(conf['PassiveTotal']['username'], conf['PassiveTotal']['key'])
-                    raw_results = client.get_passive_dns(query=unbracket(args.IP))
-                    if "results" in raw_results:
-                        for res in raw_results["results"]:
-                            passive_dns.append({
-                                "first": parse(res["firstSeen"]),
-                                "last": parse(res["lastSeen"]),
-                                "domain": res["resolve"],
-                                "source": "PT"
-                            })
-                    if "message" in raw_results:
-                        if "quota_exceeded" in raw_results["message"]:
-                            print("Quota exceeded for Passive Total")
-                            out_pt = True
-                            pt_osint = {}
-                    if not out_pt:
-                        client2 = EnrichmentRequest(conf["PassiveTotal"]["username"], conf["PassiveTotal"]['key'])
-                        # Get OSINT
-                        # TODO: add PT projects here
-                        pt_osint = client2.get_osint(query=unbracket(args.IP))
-                        # Get malware
-                        raw_results = client2.get_malware(query=unbracket(args.IP))
+                    try:
+                        raw_results = client.get_passive_dns(query=unbracket(args.IP))
                         if "results" in raw_results:
-                            for r in raw_results["results"]:
-                                malware.append({
-                                    'hash': r["sample"],
-                                    'date': parse(r['collectionDate']),
-                                    'source' : 'PT (%s)' % r["source"]
+                            for res in raw_results["results"]:
+                                passive_dns.append({
+                                    "first": parse(res["firstSeen"]),
+                                    "last": parse(res["lastSeen"]),
+                                    "domain": res["resolve"],
+                                    "source": "PT"
                                 })
+                        if "message" in raw_results:
+                            if "quota_exceeded" in raw_results["message"]:
+                                print("Quota exceeded for Passive Total")
+                                out_pt = True
+                                pt_osint = {}
+                    except requests.exceptions.ReadTimeout:
+                        print("Timeout on Passive Total requests")
+                    if not out_pt:
+                        try:
+                            client2 = EnrichmentRequest(conf["PassiveTotal"]["username"], conf["PassiveTotal"]['key'])
+                            # Get OSINT
+                            # TODO: add PT projects here
+                            pt_osint = client2.get_osint(query=unbracket(args.IP))
+                            # Get malware
+                            raw_results = client2.get_malware(query=unbracket(args.IP))
+                            if "results" in raw_results:
+                                for r in raw_results["results"]:
+                                    malware.append({
+                                        'hash': r["sample"],
+                                        'date': parse(r['collectionDate']),
+                                        'source' : 'PT (%s)' % r["source"]
+                                    })
+                        except requests.exceptions.ReadTimeout:
+                            print("Timeout on Passive Total requests")
                 # VT
                 vt_e = plugins['vt'].test_config(conf)
                 if vt_e:
@@ -344,11 +368,19 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                                     })
                             if "undetected_referrer_samples" in res['results']:
                                 for r in res['results']['undetected_referrer_samples']:
-                                    files.append({
-                                        'hash': r['sha256'],
-                                        'date': parse(r['date']),
-                                        'source' : 'VT'
-                                    })
+                                    if 'date' in r:
+                                        files.append({
+                                            'hash': r['sha256'],
+                                            'date': parse(r['date']),
+                                            'source' : 'VT'
+                                        })
+                                    else:
+                                        #FIXME : should consider data without dates
+                                        files.append({
+                                            'hash': r['sha256'],
+                                            'date': datetime.datetime(1970, 1, 1),
+                                            'source' : 'VT'
+                                        })
                             if "detected_downloaded_samples" in res['results']:
                                 for r in res['results']['detected_downloaded_samples']:
                                     malware.append({
@@ -392,8 +424,6 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                                 })
                                 already.append(r['sample_sha256'])
 
-
-                # TODO: Add MISP
                 print('----------------- Intelligence Report')
                 if otx_e:
                     if len(otx_pulses):
@@ -407,6 +437,11 @@ IP Location:    https://www.iplocation.net/?query=172.34.127.2
                             )
                     else:
                         print('OTX: Not found in any pulse')
+                if misp_e:
+                    if len(misp_results) > 0:
+                        print('MISP:')
+                        for event in misp_results:
+                            print(" -%i - %s" % (event.id, event.info))
                 if len(greynoise) > 0:
                     print("GreyNoise: IP identified as")
                     for r in greynoise:

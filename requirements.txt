@@ -8,12 +8,11 @@ censys
 git+https://github.com/Te-k/pycrtsh.git
 shodan
 fullcontact.py
-censys
 pyhunter
 git+https://github.com/Te-k/pysafe.git@v0.1
 git+https://github.com/Te-k/spyonweb.git
 PyGitHub
-telethon>=0.17.4.3
+telethon==0.18.3
 virustotal-api
 mispy
 OTXv2
@@ -24,7 +23,8 @@ git+https://github.com/maxmind/GeoIP2-python.git
 selenium
 git+https://github.com/Te-k/pygreynoise.git
 git+https://github.com/Te-k/pythreatgrid.git
-git+https://github.com/kneufeld/consolemd.git
 git+https://github.com/Te-k/pypermacc.git
 dnspython
 archiveis
+click==6.7
+consolemd==0.4.4
